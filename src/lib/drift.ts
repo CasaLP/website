@@ -33,7 +33,11 @@ export async function createDriftClient(options: CreateClientOptions = {}) {
     accountSubscription: { type: "websocket" },
     // target only provided authority/sub to minimize subscriptions
     ...(authority
-      ? { authoritySubAccountMap: { [authority.toBase58()]: [sub] } }
+      ? {
+          authoritySubAccountMap: new Map<string, number[]>([
+            [authority.toBase58(), [sub]],
+          ]),
+        }
       : {}),
     userStats: false,
     perpMarketIndexes: [],
@@ -63,19 +67,20 @@ export async function createDriftUser(opts: CreateUserOptions) {
 
   // Prefer registry user when authority was provided to client init
   let user: any = null;
-  if (opts.authority) {
-    // @ts-ignore versions may support param object
-    user =
-      driftClient.getUser?.({ authority: opts.authority, subAccountId: sub }) ||
-      // @ts-ignore fallback signature
-      driftClient.getUser?.(sub);
-  }
+  // if (opts.authority) {
+  // Prefer authority/sub overload if available, else fall back to sub only
+  // @ts-ignore - support for different sdk versions
+  // user =
+  // driftClient.getUser?.(opts.authority, sub) || driftClient.getUser?.(sub);
+  // }
 
   // If not found or no authority, construct from userAccountPublicKey
   if (!user && opts.userAccountPublicKey) {
     user = new User({
       driftClient,
       userAccountPublicKey: opts.userAccountPublicKey,
+      // Some SDK versions expect `subAccountId`, others accept only `driftClient + userAccountPublicKey`
+      // @ts-ignore
       subAccountId: sub,
     });
   }
