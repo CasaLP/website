@@ -290,12 +290,17 @@ export function WalletView({ address }: { address: string }) {
           }
         }
 
+        // Treat any flows at or before the first available value timestamp
+        // as part of the beginning value measurement, not as period cashflows.
+        // Therefore, exclude them from flows. Keep startValue as-is.
+        const periodFlows = flows.filter((f) => f.ts > periodStartTs);
+
         const r = modifiedDietzReturn({
           startValue,
           endValue,
           startTs: periodStartTs,
           endTs,
-          flows,
+          flows: periodFlows,
         });
 
         if (!Number.isFinite(r)) {
