@@ -235,37 +235,75 @@ export function WalletView({ address }: { address: string }) {
     };
   }, [address, period]);
 
-  // Compute 7D APR from last 7 days of values
+  // Compute 7D APR using Modified Dietz to neutralize deposits/withdrawals
   useEffect(() => {
     let cancelled = false;
     async function computeApr() {
       try {
         if (!address || !address.trim()) return setApr7d(null);
-        // Use last two aligned weekly points from already loaded series
-        // Fallback to null if insufficient data
-        if (valueSeries.length < 2) {
+        if (valueSeries.length === 0) {
           setApr7d(null);
           return;
         }
-        const n = valueSeries.length;
-        const startTs = valueSeries[Math.max(0, n - 2)][0];
-        const endTs = valueSeries[n - 1][0];
-        const startVal = valueSeries[Math.max(0, n - 2)][1];
-        const endVal = valueSeries[n - 1][1];
-        const startDep = findAtOrBefore(depositSeries, startTs) ?? 0;
-        const endDep = findAtOrBefore(depositSeries, endTs) ?? startDep;
-        const weeklyChange = computePctFromDeposits(
-          startVal,
-          startDep,
-          endVal,
-          endDep
-        );
-        if (!Number.isFinite(weeklyChange)) {
+
+        const endTs = valueSeries[valueSeries.length - 1][0];
+        const endValue = valueSeries[valueSeries.length - 1][1];
+        const startTs = endTs - 7 * 24 * 60 * 60; // 7 days window
+
+        // Get beginning value at startTs by picking first point on/after startTs
+        // or fallback to earliest available value
+        const startIdx = valueSeries.findIndex((p) => p[0] >= startTs);
+        const startPoint =
+          startIdx >= 0 ? valueSeries[startIdx] : valueSeries[0];
+        const periodStartTs = startPoint[0];
+        const startValue = startPoint[1];
+
+        // Fetch cashflows within window [periodStartTs, endTs]
+        const fromStr = new Date(periodStartTs * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const toStr = new Date(endTs * 1000).toISOString().slice(0, 10);
+        const flowsRes = await supabase
+          .from("account_history")
+          .select("date, event, amount")
+          .ilike("account", address)
+          .gte("date", fromStr)
+          .lte("date", toStr)
+          .order("date", { ascending: true });
+        if (cancelled) return;
+
+        type Flow = { ts: number; amount: number };
+        const flows: Flow[] = [];
+        if (!flowsRes.error && Array.isArray(flowsRes.data)) {
+          for (const r of flowsRes.data as any[]) {
+            const evt = String(r.event ?? "")
+              .trim()
+              .toLowerCase();
+            if (evt !== "deposit" && evt !== "withdrawal") continue;
+            const sign = evt === "withdrawal" ? -1 : 1;
+            const amt = sign * (Number(r.amount) || 0);
+            const ts = Math.floor(new Date(r.date).getTime() / 1000);
+            // Exclude flows exactly at the start from weighting (weight 1.0)
+            if (Number.isFinite(amt) && Number.isFinite(ts)) {
+              flows.push({ ts, amount: amt });
+            }
+          }
+        }
+
+        const r = modifiedDietzReturn({
+          startValue,
+          endValue,
+          startTs: periodStartTs,
+          endTs,
+          flows,
+        });
+
+        if (!Number.isFinite(r)) {
           setApr7d(null);
           return;
         }
-        // Convert weekly change to simple APR (no compounding)
-        const apr = weeklyChange * (365 / 7);
+        // annualize simple return over 7 days
+        const apr = r * (365 / 7);
         setApr7d(apr);
       } catch {
         if (!cancelled) setApr7d(null);
@@ -275,7 +313,36 @@ export function WalletView({ address }: { address: string }) {
     return () => {
       cancelled = true;
     };
-  }, [address, valueSeries, depositSeries]);
+  }, [address, valueSeries]);
+
+  function modifiedDietzReturn({
+    startValue,
+    endValue,
+    startTs,
+    endTs,
+    flows,
+  }: {
+    startValue: number;
+    endValue: number;
+    startTs: number;
+    endTs: number;
+    flows: Array<{ ts: number; amount: number }>;
+  }) {
+    const periodLength = Math.max(1, endTs - startTs);
+    let weightedFlows = 0;
+    let netFlows = 0;
+    for (const f of flows) {
+      if (f.ts < startTs || f.ts > endTs) continue;
+      const weight = 1 - (f.ts - startTs) / periodLength; // weight of capital time in period
+      weightedFlows += f.amount * Math.max(0, Math.min(1, weight));
+      netFlows += f.amount;
+    }
+    const denominator = startValue + weightedFlows;
+    if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) {
+      return NaN;
+    }
+    return (endValue - startValue - netFlows) / denominator;
+  }
 
   return (
     <div className="space-y-6">
