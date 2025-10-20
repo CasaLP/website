@@ -9,7 +9,9 @@ import { supabase } from "@/lib/supabase";
 
 export function WalletView({ address }: { address: string }) {
   const [period, setPeriod] = useState<"30D" | "365D">("30D");
-  const [tab, setTab] = useState<"overview" | "history">("overview");
+  const [tab, setTab] = useState<"overview" | "history" | "details">(
+    "overview"
+  );
   const [history, setHistory] = useState<
     Array<{
       date: string;
@@ -23,7 +25,7 @@ export function WalletView({ address }: { address: string }) {
   const [historyPage, setHistoryPage] = useState(1);
   const pageSize = 25;
   const [historyError, setHistoryError] = useState<string | null>(null);
-
+  const [profitShare, setProfitShare] = useState<number | null>(0.4);
   // Overview aggregates
   const [totalDeposits, setTotalDeposits] = useState<number | null>(null);
   const [apr7d, setApr7d] = useState<number | null>(null);
@@ -376,7 +378,7 @@ export function WalletView({ address }: { address: string }) {
             totalDeposits={totalDeposits}
             apr7d={apr7d}
           />
-        ) : (
+        ) : tab === "history" ? (
           <HistoryTable
             rows={history}
             page={historyPage}
@@ -385,6 +387,8 @@ export function WalletView({ address }: { address: string }) {
             onNext={() => setHistoryPage((p) => p + 1)}
             error={historyError}
           />
+        ) : (
+          <DetailsPanel address={address} profitShare={profitShare} />
         )}
       </section>
     </div>
@@ -500,8 +504,8 @@ function Tabs({
   value,
   onChange,
 }: {
-  value: "overview" | "history";
-  onChange: (v: "overview" | "history") => void;
+  value: "overview" | "history" | "details";
+  onChange: (v: "overview" | "history" | "details") => void;
 }) {
   return (
     <div className="flex gap-2 border-b border-border">
@@ -526,6 +530,17 @@ function Tabs({
         }
       >
         History
+      </button>
+      <button
+        onClick={() => onChange("details")}
+        className={
+          "px-3 py-2 text-sm -mb-px border-b-2 " +
+          (value === "details"
+            ? "border-primary text-primary"
+            : "border-transparent text-muted-foreground hover:text-foreground")
+        }
+      >
+        Details
       </button>
     </div>
   );
@@ -553,8 +568,29 @@ function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="text-sm text-muted-foreground">{label}</div>
-      <div className="mt-1 text-xl font-semibold">{value}</div>
+      <div className="mt-1 text-xl font-semibold break-all">{value}</div>
     </div>
+  );
+}
+
+function DetailsPanel({
+  address,
+  profitShare,
+}: {
+  address: string;
+  profitShare: number | null;
+}) {
+  const profitShareString: string =
+    profitShare != null && Number.isFinite(profitShare)
+      ? `${(profitShare * 100).toFixed(0)}%`
+      : "—";
+  return (
+    <>
+      <div className="grid gap-4 md:grid-cols-2">
+        <StatCard label="Account" value={address} />
+        <StatCard label="Profit Share" value={profitShareString} />
+      </div>
+    </>
   );
 }
 
