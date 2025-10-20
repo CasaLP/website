@@ -91,7 +91,9 @@ export function LineChart({ values }: { values: Array<[number, number]> }) {
       day: "2-digit",
       year: "2-digit",
     }).format(new Date(ts * 1000));
-    const sideRight = hover.px > (svgRef.current?.clientWidth || 0) / 2;
+    const containerW = svgRef.current?.clientWidth || 0;
+    const estimatedTooltipW = 160; // px, conservative for two lines of text
+    const sideRight = hover.px + 12 + estimatedTooltipW > containerW;
     const style: React.CSSProperties = {
       left: hover.px + (sideRight ? -12 : 12),
       top: hover.py - 8,
@@ -266,39 +268,51 @@ export function MultiLineChart({
           style={{ left: hover.px, top: hover.py, background: strokeValue }}
         />
       )}
-      {hover && (
-        <div
-          className="pointer-events-none absolute z-10 rounded-md border border-border bg-card/90 px-2 py-1 text-xs shadow-md whitespace-nowrap"
-          style={{
-            left: hover.px + 12,
+      {hover &&
+        (() => {
+          const containerW = svgRef.current?.clientWidth || 0;
+          const estimatedTooltipW = 200; // px, three lines of text
+          const sideRight = hover.px + 12 + estimatedTooltipW > containerW;
+          const style: React.CSSProperties = {
+            left: hover.px + (sideRight ? -12 : 12),
             top: hover.py - 8,
-          }}
-        >
-          {(() => {
-            const [ts] = values[hover.i] || [0, 0];
-            const val = values[hover.i]?.[1] ?? 0;
-            // deposits series is aligned by index when provided
-            const dep = deposits[hover.i]?.[1] ?? 0;
-            const date = new Intl.DateTimeFormat(undefined, {
-              month: "short",
-              day: "2-digit",
-              year: "2-digit",
-            }).format(new Date(ts * 1000));
-            const usdFmt = new Intl.NumberFormat(undefined, {
-              style: "currency",
-              currency: "USD",
-              maximumFractionDigits: 2,
-            });
-            return (
-              <div>
-                <div className="font-semibold">{date}</div>
-                <div className="opacity-80">Value: {usdFmt.format(val)}</div>
-                <div className="opacity-80">Deposits: {usdFmt.format(dep)}</div>
-              </div>
-            );
-          })()}
-        </div>
-      )}
+            transform: sideRight ? "translateX(-100%)" : undefined,
+          };
+          return (
+            <div
+              className="pointer-events-none absolute z-10 rounded-md border border-border bg-card/90 px-2 py-1 text-xs shadow-md whitespace-nowrap"
+              style={style}
+            >
+              {(() => {
+                const [ts] = values[hover.i] || [0, 0];
+                const val = values[hover.i]?.[1] ?? 0;
+                // deposits series is aligned by index when provided
+                const dep = deposits[hover.i]?.[1] ?? 0;
+                const date = new Intl.DateTimeFormat(undefined, {
+                  month: "short",
+                  day: "2-digit",
+                  year: "2-digit",
+                }).format(new Date(ts * 1000));
+                const usdFmt = new Intl.NumberFormat(undefined, {
+                  style: "currency",
+                  currency: "USD",
+                  maximumFractionDigits: 2,
+                });
+                return (
+                  <div>
+                    <div className="font-semibold">{date}</div>
+                    <div className="opacity-80">
+                      Value: {usdFmt.format(val)}
+                    </div>
+                    <div className="opacity-80">
+                      Deposits: {usdFmt.format(dep)}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })()}
     </div>
   );
 }
