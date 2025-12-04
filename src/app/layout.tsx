@@ -31,7 +31,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <Script id="theme-init" strategy="beforeInteractive">
-          {`(function(){try{var mql=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');var prefersDark=mql?mql.matches:null;var stored=null;try{stored=localStorage.getItem('theme');}catch(e){}var useDark=stored?stored==='dark':(prefersDark!==null?prefersDark:true);var root=document.documentElement;root.classList.toggle('dark',useDark);}catch(e){document.documentElement.classList.add('dark');}})();`}
+          {`(function(){try{var mql=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');var prefersDark=mql?mql.matches:null;var useDark=prefersDark!==null?prefersDark:true;var root=document.documentElement;root.classList.toggle('dark',useDark);if(mql){mql.addEventListener('change',function(e){root.classList.toggle('dark',e.matches);});}}catch(e){document.documentElement.classList.add('dark');}})();`}
         </Script>
         <div className="min-h-dvh bg-background text-foreground">
           <header className="py-4 text-center border-b border-border">
