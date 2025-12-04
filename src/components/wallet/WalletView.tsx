@@ -28,7 +28,9 @@ export function WalletView({ address }: { address: string }) {
   const [profitShare, setProfitShare] = useState<number | null>(0.4);
   // Overview aggregates
   const [totalDeposits, setTotalDeposits] = useState<number | null>(null);
-  const [apr7d, setApr7d] = useState<number | null>(null);
+  const [apy7d, setApy7d] = useState<number | null>(null);
+  const [apy30d, setApy30d] = useState<number | null>(null);
+  const [apy90d, setApy90d] = useState<number | null>(null);
 
   // Prefetch overview aggregates (sum deposits - withdrawals) from account_history
   useEffect(() => {
@@ -237,90 +239,187 @@ export function WalletView({ address }: { address: string }) {
     };
   }, [address, period]);
 
-  // Compute 7D APR using Modified Dietz to neutralize deposits/withdrawals
-  useEffect(() => {
-    let cancelled = false;
-    async function computeApr() {
-      try {
-        if (!address || !address.trim()) return setApr7d(null);
-        if (valueSeries.length === 0) {
-          setApr7d(null);
-          return;
-        }
+  // Helper function to get the most recent Sunday (or today if it's Sunday)
+  function getLastSunday(): Date {
+    const now = new Date();
+    const day = now.getUTCDay(); // 0=Sunday, 6=Saturday
+    const lastSunday = new Date(now);
+    lastSunday.setUTCDate(now.getUTCDate() - day);
+    lastSunday.setUTCHours(0, 0, 0, 0);
+    return lastSunday;
+  }
 
-        const endTs = valueSeries[valueSeries.length - 1][0];
-        const endValue = valueSeries[valueSeries.length - 1][1];
-        const startTs = endTs - 7 * 24 * 60 * 60; // 7 days window
+  // Helper function to find the Sunday data point closest to a target date
+  function findSundayDataPoint(
+    series: Array<[number, number]>,
+    targetSunday: Date
+  ): [number, number] | null {
+    const targetTs = Math.floor(targetSunday.getTime() / 1000);
+    // Look for data points on or within a few days of the target Sunday
+    // Since data is stored on Sundays, we look for points within 3 days
+    let bestPoint: [number, number] | null = null;
+    let minDiff = Infinity;
 
-        // Get beginning value at startTs by picking first point on/after startTs
-        // or fallback to earliest available value
-        const startIdx = valueSeries.findIndex((p) => p[0] >= startTs);
-        const startPoint =
-          startIdx >= 0 ? valueSeries[startIdx] : valueSeries[0];
-        const periodStartTs = startPoint[0];
-        const startValue = startPoint[1];
-
-        // Fetch cashflows within window [periodStartTs, endTs]
-        const fromStr = new Date(periodStartTs * 1000)
-          .toISOString()
-          .slice(0, 10);
-        const toStr = new Date(endTs * 1000).toISOString().slice(0, 10);
-        const flowsRes = await supabase
-          .from("account_history")
-          .select("date, event, amount")
-          .ilike("account", address)
-          .gte("date", fromStr)
-          .lte("date", toStr)
-          .order("date", { ascending: true });
-        if (cancelled) return;
-
-        type Flow = { ts: number; amount: number };
-        const flows: Flow[] = [];
-        if (!flowsRes.error && Array.isArray(flowsRes.data)) {
-          for (const r of flowsRes.data as any[]) {
-            const evt = String(r.event ?? "")
-              .trim()
-              .toLowerCase();
-            if (evt !== "deposit" && evt !== "withdrawal") continue;
-            const sign = evt === "withdrawal" ? -1 : 1;
-            const amt = sign * (Number(r.amount) || 0);
-            const ts = Math.floor(new Date(r.date).getTime() / 1000);
-            // Exclude flows exactly at the start from weighting (weight 1.0)
-            if (Number.isFinite(amt) && Number.isFinite(ts)) {
-              flows.push({ ts, amount: amt });
-            }
-          }
-        }
-
-        // Treat any flows at or before the first available value timestamp
-        // as part of the beginning value measurement, not as period cashflows.
-        // Therefore, exclude them from flows. Keep startValue as-is.
-        const periodFlows = flows.filter((f) => f.ts > periodStartTs);
-
-        const r = modifiedDietzReturn({
-          startValue,
-          endValue,
-          startTs: periodStartTs,
-          endTs,
-          flows: periodFlows,
-        });
-
-        if (!Number.isFinite(r)) {
-          setApr7d(null);
-          return;
-        }
-        // annualize simple return over 7 days
-        const apr = r * (365 / 7);
-        setApr7d(apr);
-      } catch {
-        if (!cancelled) setApr7d(null);
+    for (const point of series) {
+      const diff = Math.abs(point[0] - targetTs);
+      // Accept points within 3 days (in case of slight timing differences)
+      if (diff <= 3 * 24 * 60 * 60 && diff < minDiff) {
+        minDiff = diff;
+        bestPoint = point;
       }
     }
-    computeApr();
+
+    return bestPoint;
+  }
+
+  // Helper function to compute APY for a given number of weeks
+  async function computeApyForWeeks(
+    weeks: number,
+    setApy: (apy: number | null) => void,
+    cancelled: { current: boolean }
+  ) {
+    try {
+      if (!address || !address.trim()) return setApy(null);
+
+      // Calculate the target Sunday (weeks ago)
+      const lastSunday = getLastSunday();
+      const targetSunday = new Date(lastSunday);
+      targetSunday.setUTCDate(lastSunday.getUTCDate() - weeks * 7);
+
+      // Load value data - we need at least (weeks * 7) days of data
+      const cutoff = new Date(targetSunday);
+      cutoff.setUTCDate(cutoff.getUTCDate() - 7); // Add buffer
+      const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+      const valsRes = await supabase
+        .from("account_value")
+        .select("date_time, amount")
+        .ilike("account", address)
+        .gte("date_time", cutoffStr)
+        .order("date_time", { ascending: true });
+
+      if (cancelled.current) return;
+
+      let seriesVals: Array<[number, number]> = [];
+      if (!valsRes.error && Array.isArray(valsRes.data)) {
+        seriesVals = (valsRes.data as any[])
+          .map((r: any) => [
+            Math.floor(new Date(r.date_time).getTime() / 1000),
+            Number(r.amount) || 0,
+          ])
+          .filter(
+            (p): p is [number, number] =>
+              Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
+          )
+          .sort((a, b) => a[0] - b[0]);
+      }
+
+      if (seriesVals.length === 0) {
+        setApy(null);
+        return;
+      }
+
+      // Find the end point (most recent Sunday)
+      const endPoint = findSundayDataPoint(seriesVals, lastSunday);
+      if (!endPoint) {
+        setApy(null);
+        return;
+      }
+
+      const endTs = endPoint[0];
+      const endValue = endPoint[1];
+
+      // Find the start point (target Sunday, weeks ago)
+      // If we can't find the exact target Sunday, use the earliest available data point
+      let startPoint = findSundayDataPoint(seriesVals, targetSunday);
+      if (!startPoint || startPoint[0] >= endTs) {
+        // Fall back to earliest available point if target not found or too recent
+        if (seriesVals.length > 0 && seriesVals[0][0] < endTs) {
+          startPoint = seriesVals[0];
+        } else {
+          setApy(null);
+          return;
+        }
+      }
+
+      const periodStartTs = startPoint[0];
+      const startValue = startPoint[1];
+
+      // Calculate actual days between the two Sundays
+      const actualDays = (endTs - periodStartTs) / (24 * 60 * 60);
+      if (actualDays < 1) {
+        setApy(null);
+        return;
+      }
+
+      // Fetch cashflows within window [periodStartTs, endTs]
+      const fromStr = new Date(periodStartTs * 1000).toISOString().slice(0, 10);
+      const toStr = new Date(endTs * 1000).toISOString().slice(0, 10);
+      const flowsRes = await supabase
+        .from("account_history")
+        .select("date, event, amount")
+        .ilike("account", address)
+        .gte("date", fromStr)
+        .lte("date", toStr)
+        .order("date", { ascending: true });
+      if (cancelled.current) return;
+
+      type Flow = { ts: number; amount: number };
+      const flows: Flow[] = [];
+      if (!flowsRes.error && Array.isArray(flowsRes.data)) {
+        for (const r of flowsRes.data as any[]) {
+          const evt = String(r.event ?? "")
+            .trim()
+            .toLowerCase();
+          if (evt !== "deposit" && evt !== "withdrawal") continue;
+          const sign = evt === "withdrawal" ? -1 : 1;
+          const amt = sign * (Number(r.amount) || 0);
+          const ts = Math.floor(new Date(r.date).getTime() / 1000);
+          if (Number.isFinite(amt) && Number.isFinite(ts)) {
+            flows.push({ ts, amount: amt });
+          }
+        }
+      }
+
+      const periodFlows = flows.filter((f) => f.ts > periodStartTs);
+
+      const r = modifiedDietzReturn({
+        startValue,
+        endValue,
+        startTs: periodStartTs,
+        endTs,
+        flows: periodFlows,
+      });
+
+      if (!Number.isFinite(r)) {
+        setApy(null);
+        return;
+      }
+      // Calculate APY (compounded annualized yield) using the actual time period
+      // APY = (1 + r)^(365/days) - 1, which accounts for compounding
+      const periodsPerYear = 365 / actualDays;
+      const apy = Math.pow(1 + r, periodsPerYear) - 1;
+      setApy(apy);
+    } catch {
+      if (!cancelled.current) setApy(null);
+    }
+  }
+
+  // Compute 7D, 30D, and 90D APY using Modified Dietz to neutralize deposits/withdrawals
+  useEffect(() => {
+    let cancelled = { current: false };
+    async function computeApys() {
+      await Promise.all([
+        computeApyForWeeks(1, setApy7d, cancelled), // 7D (1 week)
+        computeApyForWeeks(4, setApy30d, cancelled), // 30D (4 weeks)
+        computeApyForWeeks(12, setApy90d, cancelled), // 90D (12 weeks)
+      ]);
+    }
+    computeApys();
     return () => {
-      cancelled = true;
+      cancelled.current = true;
     };
-  }, [address, valueSeries]);
+  }, [address]);
 
   function modifiedDietzReturn({
     startValue,
@@ -376,7 +475,9 @@ export function WalletView({ address }: { address: string }) {
           <OverviewCards
             currentValue={currentValue}
             totalDeposits={totalDeposits}
-            apr7d={apr7d}
+            apy7d={apy7d}
+            apy30d={apy30d}
+            apy90d={apy90d}
           />
         ) : tab === "history" ? (
           <HistoryTable
@@ -408,9 +509,12 @@ function ChartPercent({
     const tsMax = values[values.length - 1][0];
     const startVal = values[0][1];
     const endVal = values[values.length - 1][1];
-    // Find deposits at or before the first/last timestamps
+    // Find deposits at the start and end of the visible period
     const depStart = findAtOrBefore(deposits, tsMin) ?? 0;
     const depEnd = findAtOrBefore(deposits, tsMax) ?? depStart;
+
+    // Calculate return for the period shown in the chart
+    // This accounts for deposits/withdrawals during the period
     const change = computePctFromDeposits(startVal, depStart, endVal, depEnd);
     return Number.isFinite(change) ? change : null;
   }, [values, deposits]);
@@ -431,34 +535,37 @@ function findAtOrBefore(series: Array<[number, number]>, ts: number) {
   return best?.[1];
 }
 
-// Computes growth as the difference in growth between deposits and value
-// Using deposits as the baseline (principal) and value as the portfolio value.
-// Return = (endValue - endDeposits) / max(startDeposits, 1e-9) - (startValue - startDeposits)/max(startDeposits,1e-9)
-// But simpler and equivalent for start-aligned comparison:
-// We compare net values relative to deposit baseline: (endVal - endDep) / endDep vs (startVal - startDep) / startDep.
-// To avoid instability when startDeposits is 0, fall back to change in net value if possible.
+// Computes the total return percentage over the period
+// Accounts for deposits/withdrawals: return = (endValue - startValue - netDeposits) / denominator
+// Uses starting deposits if meaningful, otherwise falls back to end deposits or starting value
+// This prevents division by very small numbers that cause inflated percentages
 function computePctFromDeposits(
   startVal: number,
   startDep: number,
   endVal: number,
   endDep: number
 ) {
-  // If both start and end deposits are positive, use deposit baseline
-  if (startDep > 0 && endDep > 0) {
-    const startNetOverDep = (startVal - startDep) / startDep;
-    const endNetOverDep = (endVal - endDep) / endDep;
-    return endNetOverDep - startNetOverDep;
+  const netDeposits = endDep - startDep;
+  const valueChange = endVal - startVal;
+  const netReturn = valueChange - netDeposits;
+
+  // Prefer starting deposits if they're meaningful (at least 10% of end deposits or > $100)
+  if (Math.abs(startDep) > Math.max(100, Math.abs(endDep) * 0.1)) {
+    return netReturn / startDep;
   }
-  // If only end deposits available, measure against end deposits
-  if (endDep > 0) {
-    return (endVal - endDep) / endDep;
+
+  // If starting deposits are too small, use end deposits if available
+  // This handles cases where most deposits were made during the period
+  if (Math.abs(endDep) > 1e-9) {
+    return netReturn / endDep;
   }
-  // Fallback: compare net values relative to start net baseline if available
-  const startNet = startVal - startDep;
-  const endNet = endVal - endDep;
-  if (Math.abs(startNet) > 1e-9) {
-    return endNet / startNet - 1;
+
+  // Fall back to starting value if deposits aren't available
+  if (Math.abs(startVal) > 1e-9) {
+    return netReturn / startVal;
   }
+
+  // If all are zero or very small, can't compute meaningful return
   return NaN;
 }
 
@@ -549,17 +656,43 @@ function Tabs({
 function OverviewCards({
   currentValue,
   totalDeposits,
-  apr7d,
+  apy7d,
+  apy30d,
+  apy90d,
 }: {
   currentValue?: number;
   totalDeposits: number | null;
-  apr7d: number | null;
+  apy7d: number | null;
+  apy30d: number | null;
+  apy90d: number | null;
 }) {
+  // Calculate total return in USD
+  const totalReturn =
+    currentValue !== undefined &&
+    totalDeposits !== null &&
+    Number.isFinite(currentValue) &&
+    Number.isFinite(totalDeposits)
+      ? currentValue - totalDeposits
+      : null;
+
   return (
-    <div className="grid gap-4 md:grid-cols-3">
-      <StatCard label="Total Deposits" value={formatUsd(totalDeposits ?? 0)} />
-      <StatCard label="Current Value" value={formatUsd(currentValue)} />
-      <StatCard label="7D Avg APR" value={formatPctOrDash(apr7d)} />
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard
+          label="Total Deposits"
+          value={formatUsd(totalDeposits ?? 0)}
+        />
+        <StatCard label="Current Value" value={formatUsd(currentValue)} />
+        <StatCard
+          label="Total Return"
+          value={formatUsd(totalReturn ?? undefined)}
+        />
+      </div>
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard label="7D Avg APY" value={formatPctOrDash(apy7d)} />
+        <StatCard label="30D Avg APY" value={formatPctOrDash(apy30d)} />
+        <StatCard label="90D Avg APY" value={formatPctOrDash(apy90d)} />
+      </div>
     </div>
   );
 }
