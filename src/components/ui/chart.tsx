@@ -89,7 +89,7 @@ export function LineChart({ values }: { values: Array<[number, number]> }) {
     const date = new Intl.DateTimeFormat(undefined, {
       month: "short",
       day: "2-digit",
-      year: "2-digit",
+      year: "numeric",
     }).format(new Date(ts * 1000));
     const containerW = svgRef.current?.clientWidth || 0;
     const estimatedTooltipW = 160; // px, conservative for two lines of text
@@ -291,7 +291,7 @@ export function MultiLineChart({
                 const date = new Intl.DateTimeFormat(undefined, {
                   month: "short",
                   day: "2-digit",
-                  year: "2-digit",
+                  year: "numeric",
                 }).format(new Date(ts * 1000));
                 const usdFmt = new Intl.NumberFormat(undefined, {
                   style: "currency",
@@ -571,7 +571,7 @@ function Tooltip({
   const date = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "2-digit",
-    year: "2-digit",
+    year: "numeric",
   }).format(new Date(ts * 1000));
   const usd = new Intl.NumberFormat(undefined, {
     style: "currency",
