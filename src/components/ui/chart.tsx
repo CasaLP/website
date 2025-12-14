@@ -243,6 +243,7 @@ export function MultiLineChart({
           fill="none"
           stroke={strokeDeposits}
           strokeWidth={0.3}
+          strokeOpacity={0.9}
         />
         <path
           d={pathValues}
