@@ -281,13 +281,14 @@ export function WalletView({ address }: { address: string }) {
     try {
       if (!address || !address.trim()) return setApy(null);
 
-      // Calculate the target Sunday (weeks ago)
-      const lastSunday = getLastSunday();
-      const targetSunday = new Date(lastSunday);
-      targetSunday.setUTCDate(lastSunday.getUTCDate() - weeks * 7);
+      // We want weekly windows ending on a Sunday snapshot.
+      // On Sundays *before* the new snapshot exists, "this week's Sunday" won't have data yet.
+      // In that case, fall back to the most recent prior Sunday that *does* have a value point.
+      const requestedEndSunday = getLastSunday();
 
       // Load value data - we need at least (weeks * 7) days of data
-      const cutoff = new Date(targetSunday);
+      const cutoff = new Date(requestedEndSunday);
+      cutoff.setUTCDate(cutoff.getUTCDate() - weeks * 7);
       cutoff.setUTCDate(cutoff.getUTCDate() - 7); // Add buffer
       const cutoffStr = cutoff.toISOString().slice(0, 10);
 
@@ -319,8 +320,19 @@ export function WalletView({ address }: { address: string }) {
         return;
       }
 
-      // Find the end point (most recent Sunday)
-      const endPoint = findSundayDataPoint(seriesVals, lastSunday);
+      // Find the end point (most recent Sunday with data).
+      // Try the current week's Sunday first, then step back by weeks until we find a point.
+      let endSunday = requestedEndSunday;
+      let endPoint: [number, number] | null = null;
+      for (let i = 0; i < 12; i++) {
+        endPoint = findSundayDataPoint(seriesVals, endSunday);
+        if (endPoint) break;
+        const prev = new Date(endSunday);
+        prev.setUTCDate(prev.getUTCDate() - 7);
+        endSunday = prev;
+      }
+      // Final fallback: use the latest available value point so we still show something.
+      if (!endPoint) endPoint = seriesVals[seriesVals.length - 1] ?? null;
       if (!endPoint) {
         setApy(null);
         return;
@@ -329,7 +341,10 @@ export function WalletView({ address }: { address: string }) {
       const endTs = endPoint[0];
       const endValue = endPoint[1];
 
-      // Find the start point (target Sunday, weeks ago)
+      // Find the start point (weeks before the end Sunday we actually used)
+      const targetSunday = new Date(endSunday);
+      targetSunday.setUTCDate(endSunday.getUTCDate() - weeks * 7);
+
       // If we can't find the exact target Sunday, use the earliest available data point
       let startPoint = findSundayDataPoint(seriesVals, targetSunday);
       if (!startPoint || startPoint[0] >= endTs) {
