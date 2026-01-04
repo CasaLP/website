@@ -25,7 +25,7 @@ export function WalletView({ address }: { address: string }) {
   const [historyPage, setHistoryPage] = useState(1);
   const pageSize = 25;
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [profitShare, setProfitShare] = useState<number | null>(0.4);
+  const [profitShare, setProfitShare] = useState<number | null>(0.3);
   // Overview aggregates
   const [totalDeposits, setTotalDeposits] = useState<number | null>(null);
   const [apy7d, setApy7d] = useState<number | null>(null);
