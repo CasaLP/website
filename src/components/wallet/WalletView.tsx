@@ -131,6 +131,7 @@ export function WalletView({ address }: { address: string }) {
   const [depositSeries, setDepositSeries] = useState<Array<[number, number]>>(
     []
   );
+  const [chartReturn, setChartReturn] = useState<number | null>(null);
   const currentValue = useMemo(() => {
     if (valueSeries.length === 0) return undefined;
     return valueSeries[valueSeries.length - 1][1];
@@ -178,6 +179,7 @@ export function WalletView({ address }: { address: string }) {
 
         // Then load ALL history up to the last value date to avoid missing pre-window flows
         let seriesDeps: Array<[number, number]> = [];
+        let events: any[] = [];
         if (seriesVals.length > 0) {
           const lastStr = new Date(seriesVals[seriesVals.length - 1][0] * 1000)
             .toISOString()
@@ -189,7 +191,7 @@ export function WalletView({ address }: { address: string }) {
             .lte("date", lastStr)
             .order("date", { ascending: true });
           if (!cancelled && !histRes.error && Array.isArray(histRes.data)) {
-            const events = (histRes.data as any[])
+            events = (histRes.data as any[])
               .map((r: any) => {
                 const dateStr: string = r.date;
                 const amtRaw = Number(r.amount) || 0;
@@ -249,10 +251,35 @@ export function WalletView({ address }: { address: string }) {
 
         setValueSeries(seriesVals);
         setDepositSeries(seriesDeps);
+
+        // Calculate chart return percentage using Modified Dietz
+        if (seriesVals.length >= 2) {
+          const startPoint = seriesVals[0];
+          const endPoint = seriesVals[seriesVals.length - 1];
+          const startTs = startPoint[0];
+          const endTs = endPoint[0];
+
+          // Use events within this period
+          const periodFlows = events
+            .filter((e: any) => e.ts > startTs && e.ts <= endTs)
+            .map((e: any) => ({ ts: e.ts, amount: e.amt }));
+
+          const r = modifiedDietzReturn({
+            startValue: startPoint[1],
+            endValue: endPoint[1],
+            startTs,
+            endTs,
+            flows: periodFlows,
+          });
+          setChartReturn(Number.isFinite(r) ? r : null);
+        } else {
+          setChartReturn(null);
+        }
       } catch {
         if (!cancelled) {
           setValueSeries([]);
           setDepositSeries([]);
+          setChartReturn(null);
         }
       }
     }
@@ -457,7 +484,7 @@ export function WalletView({ address }: { address: string }) {
       <section className="rounded-lg border border-border bg-card p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-sm text-muted-foreground"></div>
-          <ChartPercent values={valueSeries} deposits={depositSeries} />
+          <ChartPercent value={chartReturn} />
         </div>
         {valueSeries.length > 0 ? (
           <MultiLineChart values={valueSeries} deposits={depositSeries} />
@@ -495,77 +522,16 @@ export function WalletView({ address }: { address: string }) {
 }
 
 function ChartPercent({
-  values,
-  deposits,
+  value,
 }: {
-  values: Array<[number, number]>;
-  deposits: Array<[number, number]>;
+  value: number | null;
 }) {
-  const pct = useMemo(() => {
-    if (!values || values.length < 2) return null;
-    const tsMin = values[0][0];
-    const tsMax = values[values.length - 1][0];
-    const startVal = values[0][1];
-    const endVal = values[values.length - 1][1];
-    // Find deposits at the start and end of the visible period
-    const depStart = findAtOrBefore(deposits, tsMin) ?? 0;
-    const depEnd = findAtOrBefore(deposits, tsMax) ?? depStart;
-
-    // Calculate return for the period shown in the chart
-    // This accounts for deposits/withdrawals during the period
-    const change = computePctFromDeposits(startVal, depStart, endVal, depEnd);
-    return Number.isFinite(change) ? change : null;
-  }, [values, deposits]);
-
   return (
-    <div className="text-sm font-medium">{formatPctOrDash(pct ?? null)}</div>
+    <div className="text-sm font-medium">{formatPctOrDash(value)}</div>
   );
 }
 
-function findAtOrBefore(series: Array<[number, number]>, ts: number) {
-  if (!series || series.length === 0) return undefined;
-  let best: [number, number] | undefined;
-  for (const p of series) {
-    if (p[0] <= ts) {
-      if (!best || p[0] > best[0]) best = p;
-    }
-  }
-  return best?.[1];
-}
 
-// Computes the total return percentage over the period
-// Accounts for deposits/withdrawals: return = (endValue - startValue - netDeposits) / denominator
-// Uses starting deposits if meaningful, otherwise falls back to end deposits or starting value
-// This prevents division by very small numbers that cause inflated percentages
-function computePctFromDeposits(
-  startVal: number,
-  startDep: number,
-  endVal: number,
-  endDep: number
-) {
-  const netDeposits = endDep - startDep;
-  const valueChange = endVal - startVal;
-  const netReturn = valueChange - netDeposits;
-
-  // Prefer starting deposits if they're meaningful (at least 10% of end deposits or > $100)
-  if (Math.abs(startDep) > Math.max(100, Math.abs(endDep) * 0.1)) {
-    return netReturn / startDep;
-  }
-
-  // If starting deposits are too small, use end deposits if available
-  // This handles cases where most deposits were made during the period
-  if (Math.abs(endDep) > 1e-9) {
-    return netReturn / endDep;
-  }
-
-  // Fall back to starting value if deposits aren't available
-  if (Math.abs(startVal) > 1e-9) {
-    return netReturn / startVal;
-  }
-
-  // If all are zero or very small, can't compute meaningful return
-  return NaN;
-}
 
 function weekEndingSunday(dateStr: string): string {
   // Input: YYYY-MM-DD; Output: YYYY-MM-DD of the Sunday ending that week
