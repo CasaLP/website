@@ -25,7 +25,7 @@ export function WalletView({ address }: { address: string }) {
   const [historyPage, setHistoryPage] = useState(1);
   const pageSize = 25;
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [profitShare, setProfitShare] = useState<number | null>(0.3);
+  const [profitShare, setProfitShare] = useState<number | null>(0.25);
   // Overview aggregates
   const [totalDeposits, setTotalDeposits] = useState<number | null>(null);
   const [pendingDeposits, setPendingDeposits] = useState<number | null>(null);
@@ -153,7 +153,7 @@ export function WalletView({ address }: { address: string }) {
         // Load values first
         const valsRes = await supabase
           .from("account_value")
-          .select("date_time, amount")
+          .select("date_time, amount, total_fee")
           .ilike("account", address)
           .gte("date_time", cutoffStr)
           .lte("date_time", lastSundayStr)
@@ -165,7 +165,7 @@ export function WalletView({ address }: { address: string }) {
           seriesVals = (valsRes.data as any[])
             .map((r: any) => [
               Math.floor(new Date(r.date_time).getTime() / 1000),
-              Number(r.amount) || 0,
+              (Number(r.amount) || 0) - (Number(r.total_fee) || 0),
             ])
             .filter(
               (p): p is [number, number] =>
@@ -286,7 +286,7 @@ export function WalletView({ address }: { address: string }) {
     return bestPoint;
   }
 
-  // Helper function to compute APY for a given number of weeks
+  // Helper function to compute APY for a given number of weeks by averaging weekly performance
   async function computeApyForWeeks(
     weeks: number,
     setApy: (apy: number | null) => void,
@@ -295,141 +295,109 @@ export function WalletView({ address }: { address: string }) {
     try {
       if (!address || !address.trim()) return setApy(null);
 
-      // We want weekly windows ending on a Sunday snapshot.
-      // On Sundays *before* the new snapshot exists, "this week's Sunday" won't have data yet.
-      // In that case, fall back to the most recent prior Sunday that *does* have a value point.
       const requestedEndSunday = getLastSunday();
-
-      // Load value data - we need at least (weeks * 7) days of data
       const cutoff = new Date(requestedEndSunday);
       cutoff.setUTCDate(cutoff.getUTCDate() - weeks * 7);
       cutoff.setUTCDate(cutoff.getUTCDate() - 7); // Add buffer
       const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-      const valsRes = await supabase
-        .from("account_value")
-        .select("date_time, amount")
-        .ilike("account", address)
-        .gte("date_time", cutoffStr)
-        .order("date_time", { ascending: true });
+      // 1. Fetch all necessary value points and flows once
+      const [valsRes, flowsRes] = await Promise.all([
+        supabase
+          .from("account_value")
+          .select("date_time, amount, total_fee")
+          .ilike("account", address)
+          .gte("date_time", cutoffStr)
+          .order("date_time", { ascending: true }),
+        supabase
+          .from("account_history")
+          .select("date, event, amount")
+          .ilike("account", address)
+          .gte("date", cutoffStr)
+          .order("date", { ascending: true }),
+      ]);
 
       if (cancelled.current) return;
 
-      let seriesVals: Array<[number, number]> = [];
-      if (!valsRes.error && Array.isArray(valsRes.data)) {
-        seriesVals = (valsRes.data as any[])
-          .map((r: any) => [
-            Math.floor(new Date(r.date_time).getTime() / 1000),
-            Number(r.amount) || 0,
-          ])
-          .filter(
-            (p): p is [number, number] =>
-              Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
-          )
-          .sort((a, b) => a[0] - b[0]);
-      }
-
-      if (seriesVals.length === 0) {
+      if (valsRes.error || !Array.isArray(valsRes.data)) {
         setApy(null);
         return;
       }
 
-      // Find the end point (most recent Sunday with data).
-      // Try the current week's Sunday first, then step back by weeks until we find a point.
-      let endSunday = requestedEndSunday;
-      let endPoint: [number, number] | null = null;
-      for (let i = 0; i < 12; i++) {
-        endPoint = findSundayDataPoint(seriesVals, endSunday);
-        if (endPoint) break;
-        const prev = new Date(endSunday);
-        prev.setUTCDate(prev.getUTCDate() - 7);
-        endSunday = prev;
-      }
-      // Final fallback: use the latest available value point so we still show something.
-      if (!endPoint) endPoint = seriesVals[seriesVals.length - 1] ?? null;
-      if (!endPoint) {
+      const seriesVals: Array<[number, number]> = valsRes.data
+        .map((r: any) => [
+          Math.floor(new Date(r.date_time).getTime() / 1000),
+          (Number(r.amount) || 0) - (Number(r.total_fee) || 0),
+        ])
+        .filter((p): p is [number, number] => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+        .sort((a, b) => a[0] - b[0]);
+
+      if (seriesVals.length < 2) {
         setApy(null);
         return;
       }
 
-      const endTs = endPoint[0];
-      const endValue = endPoint[1];
-
-      // Find the start point (weeks before the end Sunday we actually used)
-      const targetSunday = new Date(endSunday);
-      targetSunday.setUTCDate(endSunday.getUTCDate() - weeks * 7);
-
-      // If we can't find the exact target Sunday, use the earliest available data point
-      let startPoint = findSundayDataPoint(seriesVals, targetSunday);
-      if (!startPoint || startPoint[0] >= endTs) {
-        // Fall back to earliest available point if target not found or too recent
-        if (seriesVals.length > 0 && seriesVals[0][0] < endTs) {
-          startPoint = seriesVals[0];
-        } else {
-          setApy(null);
-          return;
-        }
-      }
-
-      const periodStartTs = startPoint[0];
-      const startValue = startPoint[1];
-
-      // Calculate actual days between the two Sundays
-      const actualDays = (endTs - periodStartTs) / (24 * 60 * 60);
-      if (actualDays < 1) {
-        setApy(null);
-        return;
-      }
-
-      // Fetch cashflows within window [periodStartTs, endTs]
-      const fromStr = new Date(periodStartTs * 1000).toISOString().slice(0, 10);
-      const toStr = new Date(endTs * 1000).toISOString().slice(0, 10);
-      const flowsRes = await supabase
-        .from("account_history")
-        .select("date, event, amount")
-        .ilike("account", address)
-        .gte("date", fromStr)
-        .lte("date", toStr)
-        .order("date", { ascending: true });
-      if (cancelled.current) return;
-
-      type Flow = { ts: number; amount: number };
-      const flows: Flow[] = [];
-      if (!flowsRes.error && Array.isArray(flowsRes.data)) {
-        for (const r of flowsRes.data as any[]) {
-          const evt = String(r.event ?? "")
-            .trim()
-            .toLowerCase();
-          if (evt !== "deposit" && evt !== "withdrawal") continue;
+      const allFlows: Array<{ ts: number; amount: number }> = (flowsRes.data || [])
+        .map((r: any) => {
+          const evt = String(r.event ?? "").trim().toLowerCase();
           const sign = evt === "withdrawal" ? -1 : 1;
-          const amt = sign * (Number(r.amount) || 0);
           const ts = Math.floor(new Date(r.date).getTime() / 1000);
-          if (Number.isFinite(amt) && Number.isFinite(ts)) {
-            flows.push({ ts, amount: amt });
+          const amt = sign * (Number(r.amount) || 0);
+          return { ts, amount: amt, isValid: (evt === "deposit" || evt === "withdrawal") && Number.isFinite(ts) && Number.isFinite(amt) };
+        })
+        .filter(f => f.isValid)
+        .map(f => ({ ts: f.ts, amount: f.amount }));
+
+      // 2. Iterate week by week and calculate weekly return
+      const weeklyApys: number[] = [];
+      let currentEndSunday = requestedEndSunday;
+
+      for (let i = 0; i < weeks; i++) {
+        const weekStartSunday = new Date(currentEndSunday);
+        weekStartSunday.setUTCDate(currentEndSunday.getUTCDate() - 7);
+
+        const startPoint = findSundayDataPoint(seriesVals, weekStartSunday);
+        const endPoint = findSundayDataPoint(seriesVals, currentEndSunday);
+
+        if (startPoint && endPoint && startPoint[0] < endPoint[0]) {
+          const startValue = startPoint[1];
+          const endValue = endPoint[1];
+          const startTs = startPoint[0];
+          const endTs = endPoint[0];
+
+          // Flows within this specific week
+          const weeklyFlows = allFlows.filter(f => f.ts > startTs && f.ts <= endTs);
+
+          const r = modifiedDietzReturn({
+            startValue,
+            endValue,
+            startTs,
+            endTs,
+            flows: weeklyFlows,
+          });
+
+          if (Number.isFinite(r)) {
+            // Annualize the weekly return: (1+r)^(365/days) - 1
+            const days = (endTs - startTs) / (24 * 60 * 60);
+            const weeklyApy = Math.pow(1 + r, 365 / days) - 1;
+            weeklyApys.push(weeklyApy);
           }
         }
+
+        // Move back one week
+        currentEndSunday = weekStartSunday;
       }
 
-      const periodFlows = flows.filter((f) => f.ts > periodStartTs);
-
-      const r = modifiedDietzReturn({
-        startValue,
-        endValue,
-        startTs: periodStartTs,
-        endTs,
-        flows: periodFlows,
-      });
-
-      if (!Number.isFinite(r)) {
+      if (weeklyApys.length === 0) {
         setApy(null);
         return;
       }
-      // Calculate APY (compounded annualized yield) using the actual time period
-      // APY = (1 + r)^(365/days) - 1, which accounts for compounding
-      const periodsPerYear = 365 / actualDays;
-      const apy = Math.pow(1 + r, periodsPerYear) - 1;
-      setApy(apy);
-    } catch {
+
+      // 3. Average the weekly APYs
+      const avgApy = weeklyApys.reduce((a, b) => a + b, 0) / weeklyApys.length;
+      setApy(avgApy);
+    } catch (err) {
+      console.error("APY calculation error:", err);
       if (!cancelled.current) setApy(null);
     }
   }
