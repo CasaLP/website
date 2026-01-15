@@ -2,7 +2,6 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   serverExternalPackages: [
-    "@drift-labs/sdk",
     "@triton-one/yellowstone-grpc",
     "helius-laserstream-linux-x64-gnu",
   ],

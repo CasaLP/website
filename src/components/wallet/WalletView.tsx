@@ -684,9 +684,9 @@ function OverviewCards({
   // Calculate total return in USD
   const totalReturn =
     currentValue !== undefined &&
-    totalDeposits !== null &&
-    Number.isFinite(currentValue) &&
-    Number.isFinite(totalDeposits)
+      totalDeposits !== null &&
+      Number.isFinite(currentValue) &&
+      Number.isFinite(totalDeposits)
       ? currentValue - totalDeposits
       : null;
 
@@ -763,69 +763,6 @@ function formatUsd(v?: number) {
 function formatPctOrDash(v: number | null) {
   if (v === null || !Number.isFinite(v)) return "—%";
   return formatPct(v);
-}
-
-function TestButtons({ address }: { address: string }) {
-  const [out, setOut] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-
-  async function testEquity() {
-    setBusy(true);
-    try {
-      const res = await fetch(
-        `/api/drift/equity?address=${encodeURIComponent(address)}`
-      );
-      const json = await res.json();
-      setOut(JSON.stringify(json, null, 2));
-    } catch (e: any) {
-      setOut(String(e?.message || e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function writeSnapshot() {
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/drift/snapshot`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
-      const json = await res.json();
-      setOut(JSON.stringify(json, null, 2));
-    } catch (e: any) {
-      setOut(String(e?.message || e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="w-full rounded-lg border border-border bg-card p-3">
-      <div className="flex items-center gap-2">
-        <button
-          onClick={testEquity}
-          disabled={busy}
-          className="px-3 py-1.5 rounded border border-border hover:bg-accent"
-        >
-          Test Drift Equity (no DB)
-        </button>
-        <button
-          onClick={writeSnapshot}
-          disabled={busy}
-          className="px-3 py-1.5 rounded border border-border hover:bg-accent"
-        >
-          Write Snapshot to DB
-        </button>
-      </div>
-      {out && (
-        <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
-          {out}
-        </pre>
-      )}
-    </div>
-  );
 }
 
 function HistoryTable({
