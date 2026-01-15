@@ -28,6 +28,7 @@ export function WalletView({ address }: { address: string }) {
   const [profitShare, setProfitShare] = useState<number | null>(0.3);
   // Overview aggregates
   const [totalDeposits, setTotalDeposits] = useState<number | null>(null);
+  const [pendingDeposits, setPendingDeposits] = useState<number | null>(null);
   const [apy7d, setApy7d] = useState<number | null>(null);
   const [apy30d, setApy30d] = useState<number | null>(null);
   const [apy90d, setApy90d] = useState<number | null>(null);
@@ -40,25 +41,43 @@ export function WalletView({ address }: { address: string }) {
         if (!address || !address.trim()) return;
         const { data, error } = await supabase
           .from("account_history")
-          .select("event,amount")
+          .select("event,amount,date")
           .ilike("account", address);
         if (!cancelled) {
           if (!error && Array.isArray(data)) {
+            const lastSunday = getLastSunday();
+            const lastSundayStr = lastSunday.toISOString().slice(0, 10);
+
             let deposits = 0;
             let withdrawals = 0;
+            let pDeposits = 0;
+            let pWithdrawals = 0;
+
             for (const r of data as any[]) {
               const evt = String(r.event ?? "").toLowerCase();
               const amt = Number(r.amount) || 0;
-              if (evt === "deposit") deposits += amt;
-              else if (evt === "withdrawal") withdrawals += amt;
+              const date = String(r.date ?? "");
+
+              if (date <= lastSundayStr) {
+                if (evt === "deposit") deposits += amt;
+                else if (evt === "withdrawal") withdrawals += amt;
+              } else {
+                if (evt === "deposit") pDeposits += amt;
+                else if (evt === "withdrawal") pWithdrawals += amt;
+              }
             }
             setTotalDeposits(deposits - withdrawals);
+            setPendingDeposits(pDeposits - pWithdrawals);
           } else {
             setTotalDeposits(0);
+            setPendingDeposits(0);
           }
         }
       } catch {
-        if (!cancelled) setTotalDeposits(0);
+        if (!cancelled) {
+          setTotalDeposits(0);
+          setPendingDeposits(0);
+        }
       }
     }
     loadAggregates();
@@ -123,6 +142,9 @@ export function WalletView({ address }: { address: string }) {
       try {
         if (!address || !address.trim()) return;
         const now = new Date();
+        const lastSunday = getLastSunday();
+        const lastSundayStr = lastSunday.toISOString().slice(0, 10);
+
         const cutoff = new Date(now);
         if (period === "30D") cutoff.setDate(now.getDate() - 30);
         else cutoff.setDate(now.getDate() - 365);
@@ -134,6 +156,7 @@ export function WalletView({ address }: { address: string }) {
           .select("date_time, amount")
           .ilike("account", address)
           .gte("date_time", cutoffStr)
+          .lte("date_time", lastSundayStr)
           .order("date_time", { ascending: true });
         if (cancelled) return;
 
@@ -239,15 +262,6 @@ export function WalletView({ address }: { address: string }) {
     };
   }, [address, period]);
 
-  // Helper function to get the most recent Sunday (or today if it's Sunday)
-  function getLastSunday(): Date {
-    const now = new Date();
-    const day = now.getUTCDay(); // 0=Sunday, 6=Saturday
-    const lastSunday = new Date(now);
-    lastSunday.setUTCDate(now.getUTCDate() - day);
-    lastSunday.setUTCHours(0, 0, 0, 0);
-    return lastSunday;
-  }
 
   // Helper function to find the Sunday data point closest to a target date
   function findSundayDataPoint(
@@ -490,6 +504,7 @@ export function WalletView({ address }: { address: string }) {
           <OverviewCards
             currentValue={currentValue}
             totalDeposits={totalDeposits}
+            pendingDeposits={pendingDeposits}
             apy7d={apy7d}
             apy30d={apy30d}
             apy90d={apy90d}
@@ -671,12 +686,14 @@ function Tabs({
 function OverviewCards({
   currentValue,
   totalDeposits,
+  pendingDeposits,
   apy7d,
   apy30d,
   apy90d,
 }: {
   currentValue?: number;
   totalDeposits: number | null;
+  pendingDeposits: number | null;
   apy7d: number | null;
   apy30d: number | null;
   apy90d: number | null;
@@ -696,6 +713,13 @@ function OverviewCards({
         <StatCard
           label="Total Deposits"
           value={formatUsd(totalDeposits ?? 0)}
+          subValue={
+            pendingDeposits && pendingDeposits !== 0
+              ? `(${pendingDeposits > 0 ? "+" : ""}${formatUsd(
+                pendingDeposits
+              )} pending)`
+              : undefined
+          }
         />
         <StatCard label="Current Value" value={formatUsd(currentValue)} />
         <StatCard
@@ -712,11 +736,24 @@ function OverviewCards({
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({
+  label,
+  value,
+  subValue,
+}: {
+  label: string;
+  value: string;
+  subValue?: string;
+}) {
   return (
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="text-sm text-muted-foreground">{label}</div>
-      <div className="mt-1 text-xl font-semibold break-all">{value}</div>
+      <div className="mt-1 flex flex-wrap items-baseline gap-2">
+        <span className="text-xl font-semibold break-all">{value}</span>
+        {subValue && (
+          <span className="text-sm text-muted-foreground">{subValue}</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -858,4 +895,14 @@ function formatDate(d: string) {
   } catch {
     return d;
   }
+}
+
+// Helper function to get the most recent Sunday (or today if it's Sunday)
+function getLastSunday(): Date {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sunday, 6=Saturday
+  const lastSunday = new Date(now);
+  lastSunday.setUTCDate(now.getUTCDate() - day);
+  lastSunday.setUTCHours(0, 0, 0, 0);
+  return lastSunday;
 }
