@@ -9,10 +9,11 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-  TooltipProps,
+  TooltipContentProps,
 } from "recharts";
 import {
   NameType,
+  Payload,
   ValueType,
 } from "recharts/types/component/DefaultTooltipContent";
 
@@ -38,7 +39,7 @@ const CustomTooltip = ({
   active,
   payload,
   label,
-}: TooltipProps<ValueType, NameType>) => {
+}: TooltipContentProps<ValueType, NameType>) => {
   if (active && payload && payload.length) {
     const date = new Intl.DateTimeFormat(undefined, {
       month: "short",
@@ -56,7 +57,7 @@ const CustomTooltip = ({
       <div className="rounded-md border border-border bg-card/95 px-3 py-2 text-xs shadow-xl backdrop-blur-sm">
         <div className="mb-1 font-semibold text-foreground">{date}</div>
         <div className="flex flex-col gap-1">
-          {payload.map((entry, index) => (
+          {payload.map((entry: Payload<ValueType, NameType>, index: number) => (
             <div
               key={index}
               className="flex items-center justify-between gap-4"
@@ -142,7 +143,7 @@ export function ModernPerformanceChart({ data }: ModernPerformanceChartProps) {
             axisLine={false}
             tickFormatter={(val) => usdFmtShort.format(val)}
           />
-          <Tooltip content={<CustomTooltip />} />
+          <Tooltip content={CustomTooltip} />
           <Area
             type="monotone"
             dataKey="value"
