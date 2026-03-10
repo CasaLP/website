@@ -1,16 +1,16 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import {
-  LineChart,
   LineChartSkeleton,
-  MultiLineChart,
+  ModernPerformanceChart,
 } from "@/components/ui/chart";
 import { supabase } from "@/lib/supabase";
 
 export function WalletView({ address }: { address: string }) {
-  const [period, setPeriod] = useState<"30D" | "365D">("30D");
+  const [period, setPeriod] = useState<"30D" | "90D" | "365D">("365D");
   const [tab, setTab] = useState<"overview" | "history" | "details">(
-    "overview"
+    "overview",
   );
   const [history, setHistory] = useState<
     Array<{
@@ -18,12 +18,22 @@ export function WalletView({ address }: { address: string }) {
       event: string;
       amount: number;
       exchange?: string | null;
-      notes?: string | null;
-      sub_account?: string | null;
     }>
   >([]);
   const [historyPage, setHistoryPage] = useState(1);
+  const [sortConfig, setSortConfig] = useState<{
+    key: "timestamp" | "type" | "amount" | "method";
+    direction: "asc" | "desc";
+  }>({ key: "timestamp", direction: "desc" });
   const pageSize = 25;
+
+  const handleSort = (key: typeof sortConfig.key) => {
+    setSortConfig((prev) => ({
+      key,
+      direction: prev.key === key && prev.direction === "desc" ? "asc" : "desc",
+    }));
+    setHistoryPage(1); // Reset to first page on sort
+  };
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [profitShare, setProfitShare] = useState<number | null>(0.25);
   // Overview aggregates
@@ -33,20 +43,57 @@ export function WalletView({ address }: { address: string }) {
   const [apy30d, setApy30d] = useState<number | null>(null);
   const [apy90d, setApy90d] = useState<number | null>(null);
 
-  // Prefetch overview aggregates (sum deposits - withdrawals) from account_history
+  const [accountId, setAccountId] = useState<number | null>(null);
+
+  // Fetch account ID first
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchAccountId() {
+      if (!address || !address.trim()) {
+        setAccountId(null);
+        return;
+      }
+      try {
+        // Use ilike for case-insensitive match on address
+        const { data, error } = await supabase
+          .from("accounts_migration")
+          .select("id")
+          .ilike("address", address)
+          .maybeSingle(); // Use maybeSingle to avoid 406 if multiple matches (should be unique) or 0 matches
+
+        if (!cancelled) {
+          if (!error && data) {
+            setAccountId(data.id);
+          } else {
+            console.warn("Account not found for address:", address, error);
+            setAccountId(null);
+          }
+        }
+      } catch (e) {
+        console.error("Error fetching account ID", e);
+      }
+    }
+    fetchAccountId();
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
+
+  // Prefetch overview aggregates (sum deposits - withdrawals) from transactions
   useEffect(() => {
     let cancelled = false;
     async function loadAggregates() {
       try {
-        if (!address || !address.trim()) return;
+        if (!accountId) return;
         const { data, error } = await supabase
-          .from("account_history")
-          .select("event,amount,date")
-          .ilike("account", address);
+          .from("transactions_migration")
+          .select("type, amount, timestamp")
+          .eq("account_id", accountId);
+
         if (!cancelled) {
           if (!error && Array.isArray(data)) {
             const lastSunday = getLastSunday();
-            const lastSundayStr = lastSunday.toISOString().slice(0, 10);
+            const lastSundayStr = lastSunday.toISOString().slice(0, 10); // Use date-only for comparison if data is date-only
 
             let deposits = 0;
             let withdrawals = 0;
@@ -54,9 +101,10 @@ export function WalletView({ address }: { address: string }) {
             let pWithdrawals = 0;
 
             for (const r of data as any[]) {
-              const evt = String(r.event ?? "").toLowerCase();
+              const evt = String(r.type ?? "").toLowerCase();
               const amt = Number(r.amount) || 0;
-              const date = String(r.date ?? "");
+              const ts = String(r.timestamp ?? "");
+              const date = ts.slice(0, 10);
 
               if (date <= lastSundayStr) {
                 if (evt === "deposit") deposits += amt;
@@ -84,34 +132,32 @@ export function WalletView({ address }: { address: string }) {
     return () => {
       cancelled = true;
     };
-  }, [address]);
+  }, [accountId]);
 
-  // History fetch from account_history
+  // History fetch from transactions
   useEffect(() => {
     if (tab !== "history") return;
     let cancelled = false;
     async function loadHistory() {
-      if (!address || !address.trim()) return;
+      if (!accountId) return;
       const from = (historyPage - 1) * pageSize;
       const to = from + pageSize - 1;
       const { data, error } = await supabase
-        .from("account_history")
-        .select("date, event, amount, exchange, notes, sub_account")
-        .ilike("account", address)
-        .order("date", { ascending: false })
+        .from("transactions_migration")
+        .select("timestamp, type, amount, method")
+        .eq("account_id", accountId)
+        .order(sortConfig.key, { ascending: sortConfig.direction === "asc" })
         .range(from, to);
       if (!cancelled) {
         if (!error && data) {
           setHistoryError(null);
           setHistory(
             (data as any[]).map((r: any) => ({
-              date: r.date,
-              event: String(r.event ?? "").toLowerCase(),
+              date: r.timestamp,
+              event: String(r.type ?? "").toLowerCase(),
               amount: Number(r.amount),
-              exchange: r.exchange ?? null,
-              notes: r.notes ?? null,
-              sub_account: r.sub_account ?? null,
-            }))
+              exchange: r.method ?? null,
+            })),
           );
         } else {
           setHistory([]);
@@ -124,162 +170,108 @@ export function WalletView({ address }: { address: string }) {
     return () => {
       cancelled = true;
     };
-  }, [tab, address, historyPage]);
+  }, [tab, accountId, historyPage, sortConfig]);
 
-  // Value series fetch from account_value
+  // Value series fetch from weekly_snapshots
   const [valueSeries, setValueSeries] = useState<Array<[number, number]>>([]);
   const [depositSeries, setDepositSeries] = useState<Array<[number, number]>>(
-    []
+    [],
   );
-  const [chartReturn, setChartReturn] = useState<number | null>(null);
   const currentValue = useMemo(() => {
     if (valueSeries.length === 0) return undefined;
     return valueSeries[valueSeries.length - 1][1];
   }, [valueSeries]);
 
+  const chartData = useMemo(() => {
+    return valueSeries.map(([ts, val], i) => ({
+      timestamp: ts,
+      value: val,
+      deposits: depositSeries[i]?.[1] ?? 0,
+    }));
+  }, [valueSeries, depositSeries]);
+
   useEffect(() => {
     let cancelled = false;
     async function loadData() {
       try {
-        if (!address || !address.trim()) return;
+        if (!accountId) return;
         const now = new Date();
         const lastSunday = getLastSunday();
         const lastSundayStr = lastSunday.toISOString().slice(0, 10);
 
         const cutoff = new Date(now);
         if (period === "30D") cutoff.setDate(now.getDate() - 30);
+        else if (period === "90D") cutoff.setDate(now.getDate() - 90);
         else cutoff.setDate(now.getDate() - 365);
         const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-        // Load values first
-        const valsRes = await supabase
-          .from("account_value")
-          .select("date_time, amount, total_fee")
-          .ilike("account", address)
-          .gte("date_time", cutoffStr)
-          .lte("date_time", lastSundayStr)
-          .order("date_time", { ascending: true });
+        // Load weekly snapshots
+        const [snapsRes, priorFlowRes] = await Promise.all([
+          supabase
+            .from("weekly_snapshots_migration")
+            .select(
+              "week_ending, total_value, net_contributions, fee_accrued_unsettled, fee_accrued_settled",
+            )
+            .eq("account_id", accountId)
+            .gte("week_ending", cutoffStr)
+            .lte("week_ending", lastSundayStr)
+            .order("week_ending", { ascending: true }),
+          supabase
+            .from("weekly_snapshots_migration")
+            .select("net_contributions")
+            .eq("account_id", accountId)
+            .lt("week_ending", cutoffStr),
+        ]);
+
         if (cancelled) return;
 
         let seriesVals: Array<[number, number]> = [];
-        if (!valsRes.error && Array.isArray(valsRes.data)) {
-          seriesVals = (valsRes.data as any[])
-            .map((r: any) => [
-              Math.floor(new Date(r.date_time).getTime() / 1000),
-              (Number(r.amount) || 0) - (Number(r.total_fee) || 0),
-            ])
-            .filter(
-              (p): p is [number, number] =>
-                Array.isArray(p) &&
-                Number.isFinite(p[0]) &&
-                Number.isFinite(p[1])
-            )
-            .sort((a, b) => a[0] - b[0]);
-        }
-
-        // Then load ALL history up to the last value date to avoid missing pre-window flows
         let seriesDeps: Array<[number, number]> = [];
-        let events: any[] = [];
-        if (seriesVals.length > 0) {
-          const lastStr = new Date(seriesVals[seriesVals.length - 1][0] * 1000)
-            .toISOString()
-            .slice(0, 10);
-          const histRes = await supabase
-            .from("account_history")
-            .select("date, event, amount")
-            .ilike("account", address)
-            .lte("date", lastStr)
-            .order("date", { ascending: true });
-          if (!cancelled && !histRes.error && Array.isArray(histRes.data)) {
-            events = (histRes.data as any[])
-              .map((r: any) => {
-                const dateStr: string = r.date;
-                const amtRaw = Number(r.amount) || 0;
-                const evt = String(r.event ?? "")
-                  .trim()
-                  .toLowerCase();
-                const sign = evt === "withdrawal" ? -1 : 1;
-                return {
-                  dateStr,
-                  ts: Math.floor(new Date(r.date).getTime() / 1000),
-                  amt: sign * amtRaw,
-                  isDeposit: sign > 0,
-                };
-              })
-              .sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+        let cumNetFlow = 0;
 
-            const byWeek = new Map<string, number>();
-            for (const e of events) {
-              const endStr = weekEndingSunday(e.dateStr);
-              byWeek.set(endStr, (byWeek.get(endStr) || 0) + e.amt);
-            }
-            // initial cumulative from weeks strictly before the first visible value week
-            const firstStr = new Date(seriesVals[0][0] * 1000)
-              .toISOString()
-              .slice(0, 10);
-            let cum = 0;
-            for (const [week, amt] of byWeek.entries()) {
-              if (week < firstStr) cum += amt || 0;
-            }
-            // step through aligned value timestamps and add that week's flow
-            for (const [ts] of seriesVals) {
-              const dStr = new Date(ts * 1000).toISOString().slice(0, 10);
-              cum += byWeek.get(dStr) || 0;
-              seriesDeps.push([ts, cum]);
-            }
-
-            // If first deposit in window precedes first value point, prepend
-            const firstDep = events.find(
-              (e) => e.isDeposit && e.dateStr >= cutoffStr
-            );
-            if (
-              firstDep &&
-              (seriesVals.length === 0 || firstDep.ts < seriesVals[0][0])
-            ) {
-              let cumAtOrigin = 0;
-              for (const e of events) {
-                if (e.dateStr <= firstDep.dateStr) cumAtOrigin += e.amt;
-              }
-              seriesVals = [
-                [firstDep.ts, Math.max(cumAtOrigin, 0)],
-                ...seriesVals,
-              ];
-              seriesDeps = [[firstDep.ts, cumAtOrigin], ...seriesDeps];
-            }
-          }
+        if (!priorFlowRes.error && priorFlowRes.data) {
+          cumNetFlow = (priorFlowRes.data as any[]).reduce(
+            (sum, r) => sum + (Number(r.net_contributions) || 0),
+            0,
+          );
         }
 
-        setValueSeries(seriesVals);
-        setDepositSeries(seriesDeps);
+        if (!snapsRes.error && Array.isArray(snapsRes.data)) {
+          // Process snapshots
+          const snaps = (snapsRes.data as any[])
+            .map((r: any) => ({
+              ts: Math.floor(new Date(r.week_ending).getTime() / 1000),
+              val:
+                (Number(r.total_value) || 0) -
+                (Number(r.fee_accrued_unsettled) || 0) -
+                (Number(r.fee_accrued_settled) || 0),
+              flow: Number(r.net_contributions) || 0,
+            }))
+            .sort((a, b) => a.ts - b.ts);
 
-        // Calculate chart return percentage using Modified Dietz
-        if (seriesVals.length >= 2) {
-          const startPoint = seriesVals[0];
-          const endPoint = seriesVals[seriesVals.length - 1];
-          const startTs = startPoint[0];
-          const endTs = endPoint[0];
+          // We need an initial cumulative deposit value.
+          // Since we only have snapshots in the window, we might miss prior deposits.
+          // For visualization, we can start cumNetFlow at 0 or try to fetch sum of all prior net_contributions.
+          // Let's try to fetch prior sum to be accurate on "Total Deposited" line if possible,
+          // or just accumulate from window start.
+          // Simplified approach: accumulate from window start (relative to chart start).
 
-          // Use events within this period
-          const periodFlows = events
-            .filter((e: any) => e.ts > startTs && e.ts <= endTs)
-            .map((e: any) => ({ ts: e.ts, amount: e.amt }));
+          for (const s of snaps) {
+            seriesVals.push([s.ts, s.val]);
+            cumNetFlow += s.flow;
+            seriesDeps.push([s.ts, cumNetFlow]);
+          }
 
-          const r = modifiedDietzReturn({
-            startValue: startPoint[1],
-            endValue: endPoint[1],
-            startTs,
-            endTs,
-            flows: periodFlows,
-          });
-          setChartReturn(Number.isFinite(r) ? r : null);
+          setValueSeries(seriesVals);
+          setDepositSeries(seriesDeps);
         } else {
-          setChartReturn(null);
+          setValueSeries([]);
+          setDepositSeries([]);
         }
       } catch {
         if (!cancelled) {
           setValueSeries([]);
           setDepositSeries([]);
-          setChartReturn(null);
         }
       }
     }
@@ -287,132 +279,105 @@ export function WalletView({ address }: { address: string }) {
     return () => {
       cancelled = true;
     };
-  }, [address, period]);
-
-
-  // Helper function to find the Sunday data point closest to a target date
-  function findSundayDataPoint(
-    series: Array<[number, number]>,
-    targetSunday: Date
-  ): [number, number] | null {
-    const targetTs = Math.floor(targetSunday.getTime() / 1000);
-    // Look for data points on or within a few days of the target Sunday
-    // Since data is stored on Sundays, we look for points within 3 days
-    let bestPoint: [number, number] | null = null;
-    let minDiff = Infinity;
-
-    for (const point of series) {
-      const diff = Math.abs(point[0] - targetTs);
-      // Accept points within 3 days (in case of slight timing differences)
-      if (diff <= 3 * 24 * 60 * 60 && diff < minDiff) {
-        minDiff = diff;
-        bestPoint = point;
-      }
-    }
-
-    return bestPoint;
-  }
+  }, [accountId, period]);
 
   // Helper function to compute APY for a given number of weeks by averaging weekly performance
   async function computeApyForWeeks(
     weeks: number,
     setApy: (apy: number | null) => void,
-    cancelled: { current: boolean }
+    cancelled: { current: boolean },
   ) {
     try {
-      if (!address || !address.trim()) return setApy(null);
+      if (!accountId) return setApy(null);
 
       const requestedEndSunday = getLastSunday();
       const cutoff = new Date(requestedEndSunday);
       cutoff.setUTCDate(cutoff.getUTCDate() - weeks * 7);
-      cutoff.setUTCDate(cutoff.getUTCDate() - 7); // Add buffer
+      cutoff.setUTCDate(cutoff.getUTCDate() - 7); // Add buffer for start point
       const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-      // 1. Fetch all necessary value points and flows once
-      const [valsRes, flowsRes] = await Promise.all([
-        supabase
-          .from("account_value")
-          .select("date_time, amount, total_fee")
-          .ilike("account", address)
-          .gte("date_time", cutoffStr)
-          .order("date_time", { ascending: true }),
-        supabase
-          .from("account_history")
-          .select("date, event, amount")
-          .ilike("account", address)
-          .gte("date", cutoffStr)
-          .order("date", { ascending: true }),
-      ]);
+      // 1. Fetch weekly snapshots
+      const { data, error } = await supabase
+        .from("weekly_snapshots_migration")
+        .select(
+          "week_ending, total_value, net_contributions, fee_accrued_unsettled, fee_accrued_settled",
+        )
+        .eq("account_id", accountId)
+        .gte("week_ending", cutoffStr)
+        .order("week_ending", { ascending: true });
 
       if (cancelled.current) return;
 
-      if (valsRes.error || !Array.isArray(valsRes.data)) {
+      if (error || !Array.isArray(data)) {
         setApy(null);
         return;
       }
 
-      const seriesVals: Array<[number, number]> = valsRes.data
-        .map((r: any) => [
-          Math.floor(new Date(r.date_time).getTime() / 1000),
-          (Number(r.amount) || 0) - (Number(r.total_fee) || 0),
-        ])
-        .filter((p): p is [number, number] => Number.isFinite(p[0]) && Number.isFinite(p[1]))
-        .sort((a, b) => a[0] - b[0]);
+      const snaps = data
+        .map((r: any) => ({
+          ts: Math.floor(new Date(r.week_ending).getTime() / 1000),
+          val:
+            (Number(r.total_value) || 0) -
+            (Number(r.fee_accrued_unsettled) || 0) -
+            (Number(r.fee_accrued_settled) || 0),
+          flow: Number(r.net_contributions) || 0,
+        }))
+        .sort((a, b) => a.ts - b.ts);
 
-      if (seriesVals.length < 2) {
+      if (snaps.length < 2) {
         setApy(null);
         return;
       }
-
-      const allFlows: Array<{ ts: number; amount: number }> = (flowsRes.data || [])
-        .map((r: any) => {
-          const evt = String(r.event ?? "").trim().toLowerCase();
-          const sign = evt === "withdrawal" ? -1 : 1;
-          const ts = Math.floor(new Date(r.date).getTime() / 1000);
-          const amt = sign * (Number(r.amount) || 0);
-          return { ts, amount: amt, isValid: (evt === "deposit" || evt === "withdrawal") && Number.isFinite(ts) && Number.isFinite(amt) };
-        })
-        .filter(f => f.isValid)
-        .map(f => ({ ts: f.ts, amount: f.amount }));
 
       // 2. Iterate week by week and calculate weekly return
       const weeklyApys: number[] = [];
       let currentEndSunday = requestedEndSunday;
+      const currentEndTs = Math.floor(currentEndSunday.getTime() / 1000);
+
+      // Find indices in sorted snaps
+      // We need to walk backwards from requestedEndSunday 'weeks' times.
 
       for (let i = 0; i < weeks; i++) {
-        const weekStartSunday = new Date(currentEndSunday);
-        weekStartSunday.setUTCDate(currentEndSunday.getUTCDate() - 7);
+        // Target Sunday for end of this week
+        const targetEndTs = currentEndTs - i * 7 * 24 * 3600;
+        // Target Sunday for start of this week (previous week end)
+        const targetStartTs = targetEndTs - 7 * 24 * 3600;
 
-        const startPoint = findSundayDataPoint(seriesVals, weekStartSunday);
-        const endPoint = findSundayDataPoint(seriesVals, currentEndSunday);
+        // Find points in snaps approx matching these timestamps
+        const endSnap = snaps.find(
+          (s) => Math.abs(s.ts - targetEndTs) < 3 * 24 * 3600,
+        );
+        const startSnap = snaps.find(
+          (s) => Math.abs(s.ts - targetStartTs) < 3 * 24 * 3600,
+        );
 
-        if (startPoint && endPoint && startPoint[0] < endPoint[0]) {
-          const startValue = startPoint[1];
-          const endValue = endPoint[1];
-          const startTs = startPoint[0];
-          const endTs = endPoint[0];
+        if (startSnap && endSnap) {
+          const startValue = startSnap.val;
+          const endValue = endSnap.val;
+          const startTs = startSnap.ts;
+          const endTs = endSnap.ts;
+          // The flow for this week is in the endSnap
+          const flowAmount = endSnap.flow;
 
-          // Flows within this specific week
-          const weeklyFlows = allFlows.filter(f => f.ts > startTs && f.ts <= endTs);
+          // Dietz calculation for one week
+          // Flow is assumed to be at endTs (snapshot time)
+          const flows = [{ ts: endTs, amount: flowAmount }];
 
           const r = modifiedDietzReturn({
             startValue,
             endValue,
             startTs,
             endTs,
-            flows: weeklyFlows,
+            flows,
           });
 
           if (Number.isFinite(r)) {
-            // Annualize the weekly return: (1+r)^(365/days) - 1
-            const days = (endTs - startTs) / (24 * 60 * 60);
-            const weeklyApy = Math.pow(1 + r, 365 / days) - 1;
-            weeklyApys.push(weeklyApy);
+            // Annualize: (1+r)^52 - 1 approximately, or (1+r)^(365/7)
+            const days = (endTs - startTs) / 86400;
+            const annual = Math.pow(1 + r, 365 / days) - 1;
+            weeklyApys.push(annual);
           }
         }
-
-        // Move back one week
-        currentEndSunday = weekStartSunday;
       }
 
       if (weeklyApys.length === 0) {
@@ -443,7 +408,7 @@ export function WalletView({ address }: { address: string }) {
     return () => {
       cancelled.current = true;
     };
-  }, [address]);
+  }, [accountId]);
 
   function modifiedDietzReturn({
     startValue,
@@ -478,16 +443,17 @@ export function WalletView({ address }: { address: string }) {
     <div className="space-y-6">
       <header className="flex items-start justify-between gap-4">
         <h1 className="text-xl font-semibold break-all">{address}</h1>
-        <PeriodToggle value={period} onChange={setPeriod} />
       </header>
 
       <section className="rounded-lg border border-border bg-card p-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm text-muted-foreground"></div>
-          <ChartPercent value={chartReturn} />
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+            Performance
+          </h2>
+          <PeriodToggle value={period} onChange={setPeriod} />
         </div>
-        {valueSeries.length > 0 ? (
-          <MultiLineChart values={valueSeries} deposits={depositSeries} />
+        {chartData.length > 0 ? (
+          <ModernPerformanceChart data={chartData} />
         ) : (
           <LineChartSkeleton />
         )}
@@ -509,6 +475,8 @@ export function WalletView({ address }: { address: string }) {
             rows={history}
             page={historyPage}
             pageSize={pageSize}
+            sortConfig={sortConfig}
+            onSort={handleSort}
             onPrev={() => setHistoryPage((p) => Math.max(1, p - 1))}
             onNext={() => setHistoryPage((p) => p + 1)}
             error={historyError}
@@ -520,18 +488,6 @@ export function WalletView({ address }: { address: string }) {
     </div>
   );
 }
-
-function ChartPercent({
-  value,
-}: {
-  value: number | null;
-}) {
-  return (
-    <div className="text-sm font-medium">{formatPctOrDash(value)}</div>
-  );
-}
-
-
 
 function weekEndingSunday(dateStr: string): string {
   // Input: YYYY-MM-DD; Output: YYYY-MM-DD of the Sunday ending that week
@@ -547,10 +503,10 @@ function PeriodToggle({
   value,
   onChange,
 }: {
-  value: "30D" | "365D";
-  onChange: (v: "30D" | "365D") => void;
+  value: "30D" | "90D" | "365D";
+  onChange: (v: "30D" | "90D" | "365D") => void;
 }) {
-  const options: Array<"30D" | "365D"> = ["30D", "365D"];
+  const options: Array<"30D" | "90D" | "365D"> = ["30D", "90D", "365D"];
   return (
     <div className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-1">
       {options.map((label) => (
@@ -635,37 +591,51 @@ function OverviewCards({
   // Calculate total return in USD
   const totalReturn =
     currentValue !== undefined &&
-      totalDeposits !== null &&
-      Number.isFinite(currentValue) &&
-      Number.isFinite(totalDeposits)
+    totalDeposits !== null &&
+    Number.isFinite(currentValue) &&
+    Number.isFinite(totalDeposits)
       ? currentValue - totalDeposits
       : null;
 
   return (
-    <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-3">
-        <StatCard
-          label="Total Deposits"
-          value={formatUsd(totalDeposits ?? 0)}
-          subValue={
-            pendingDeposits && pendingDeposits !== 0
-              ? `(${pendingDeposits > 0 ? "+" : ""}${formatUsd(
-                pendingDeposits
+    <div className="flex flex-wrap gap-4">
+      <StatCard
+        label="Total Deposits"
+        value={formatUsd(totalDeposits ?? 0)}
+        subValue={
+          pendingDeposits && pendingDeposits !== 0
+            ? `(${pendingDeposits > 0 ? "+" : ""}${formatUsd(
+                pendingDeposits,
               )} pending)`
-              : undefined
-          }
-        />
-        <StatCard label="Current Value" value={formatUsd(currentValue)} />
-        <StatCard
-          label="Total Return"
-          value={formatUsd(totalReturn ?? undefined)}
-        />
-      </div>
-      <div className="grid gap-4 md:grid-cols-3">
-        <StatCard label="7D Avg APY" value={formatPctOrDash(apy7d)} />
-        <StatCard label="30D Avg APY" value={formatPctOrDash(apy30d)} />
-        <StatCard label="90D Avg APY" value={formatPctOrDash(apy90d)} />
-      </div>
+            : undefined
+        }
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
+      <StatCard
+        label="Current Value"
+        value={formatUsd(currentValue)}
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
+      <StatCard
+        label="Total Return"
+        value={formatUsd(totalReturn ?? undefined)}
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
+      <StatCard
+        label="7D Avg APY"
+        value={formatPctOrDash(apy7d)}
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
+      <StatCard
+        label="30D Avg APY"
+        value={formatPctOrDash(apy30d)}
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
+      <StatCard
+        label="90D Avg APY"
+        value={formatPctOrDash(apy90d)}
+        className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
+      />
     </div>
   );
 }
@@ -674,13 +644,17 @@ function StatCard({
   label,
   value,
   subValue,
+  className = "",
 }: {
   label: string;
   value: string;
   subValue?: string;
+  className?: string;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-card p-4">
+    <div
+      className={`rounded-lg border border-border bg-card p-4 shadow-sm ${className}`}
+    >
       <div className="text-sm text-muted-foreground">{label}</div>
       <div className="mt-1 flex flex-wrap items-baseline gap-2">
         <span className="text-xl font-semibold break-all">{value}</span>
@@ -705,9 +679,17 @@ function DetailsPanel({
       : "—";
   return (
     <>
-      <div className="grid gap-4 md:grid-cols-2">
-        <StatCard label="Account" value={address} />
-        <StatCard label="Profit Share" value={profitShareString} />
+      <div className="flex flex-wrap gap-4">
+        <StatCard
+          label="Account"
+          value={address}
+          className="flex-1 min-w-[calc(100%-8px)] md:min-w-[calc(75%-11px)]"
+        />
+        <StatCard
+          label="Profit Share"
+          value={profitShareString}
+          className="flex-1 min-w-[calc(100%-8px)] md:min-w-[calc(25%-11px)]"
+        />
       </div>
     </>
   );
@@ -740,6 +722,8 @@ function HistoryTable({
   rows,
   page,
   pageSize,
+  sortConfig,
+  onSort,
   onPrev,
   onNext,
   error,
@@ -749,27 +733,66 @@ function HistoryTable({
     event: string;
     amount: number;
     exchange?: string | null;
-    notes?: string | null;
-    sub_account?: string | null;
   }>;
   page: number;
   pageSize: number;
+  sortConfig: {
+    key: "timestamp" | "type" | "amount" | "method";
+    direction: "asc" | "desc";
+  };
+  onSort: (key: "timestamp" | "type" | "amount" | "method") => void;
   onPrev: () => void;
   onNext: () => void;
   error?: string | null;
 }) {
+  const getSortIcon = (key: typeof sortConfig.key) => {
+    if (sortConfig.key !== key)
+      return <ArrowUpDown className="ml-1 h-3 w-3 opacity-50" />;
+    return sortConfig.direction === "asc" ? (
+      <ArrowUp className="ml-1 h-3 w-3" />
+    ) : (
+      <ArrowDown className="ml-1 h-3 w-3" />
+    );
+  };
+
   return (
-    <div className="rounded-lg border border-border bg-card">
+    <div className="rounded-lg border border-border bg-card shadow-sm">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-left text-muted-foreground">
             <tr>
-              <th className="px-3 py-2">Date</th>
-              <th className="px-3 py-2">Action</th>
-              <th className="px-3 py-2">Amount</th>
-              <th className="px-3 py-2">Exchange</th>
-              <th className="px-3 py-2">Sub-Account</th>
-              <th className="px-3 py-2">Note</th>
+              <th
+                onClick={() => onSort("timestamp")}
+                className="px-3 py-2 cursor-pointer hover:bg-accent/50 select-none"
+              >
+                <div className="flex items-center">
+                  Date {getSortIcon("timestamp")}
+                </div>
+              </th>
+              <th
+                onClick={() => onSort("type")}
+                className="px-3 py-2 cursor-pointer hover:bg-accent/50 select-none"
+              >
+                <div className="flex items-center">
+                  Action {getSortIcon("type")}
+                </div>
+              </th>
+              <th
+                onClick={() => onSort("amount")}
+                className="px-3 py-2 cursor-pointer hover:bg-accent/50 select-none"
+              >
+                <div className="flex items-center">
+                  Amount {getSortIcon("amount")}
+                </div>
+              </th>
+              <th
+                onClick={() => onSort("method")}
+                className="px-3 py-2 cursor-pointer hover:bg-accent/50 select-none"
+              >
+                <div className="flex items-center">
+                  Method {getSortIcon("method")}
+                </div>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -777,7 +800,7 @@ function HistoryTable({
               <tr>
                 <td
                   className="px-3 py-6 text-center text-muted-foreground"
-                  colSpan={6}
+                  colSpan={4}
                 >
                   {error ?? "No entries"}
                 </td>
@@ -789,9 +812,6 @@ function HistoryTable({
                   <td className="px-3 py-2 capitalize">{r.event}</td>
                   <td className="px-3 py-2">{formatUsd(r.amount)}</td>
                   <td className="px-3 py-2">{r.exchange ?? "—"}</td>
-                  <td className="px-3 py-2">{r.sub_account ?? "—"}</td>
-
-                  <td className="px-3 py-2">{r.notes ?? "—"}</td>
                 </tr>
               ))
             )}
@@ -837,6 +857,6 @@ function getLastSunday(): Date {
   const day = now.getUTCDay(); // 0=Sunday, 6=Saturday
   const lastSunday = new Date(now);
   lastSunday.setUTCDate(now.getUTCDate() - day);
-  lastSunday.setUTCHours(0, 0, 0, 0);
+  lastSunday.setUTCHours(23, 59, 59, 999);
   return lastSunday;
 }
