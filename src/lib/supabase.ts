@@ -7,17 +7,8 @@ const PUBLIC_KEY =
 
 export const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  PUBLIC_KEY
+  PUBLIC_KEY,
 );
-
-// Server-only admin client for writes/management (do NOT import in client components)
-export const supabaseAdmin =
-  typeof window === "undefined"
-    ? createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SECRET_KEY || ""
-      )
-    : (null as any);
 
 export function isValidSolanaAddress(address: string): boolean {
   // Base58 (no 0, O, I, l), usually 32-44 chars

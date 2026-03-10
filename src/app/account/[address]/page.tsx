@@ -1,5 +1,4 @@
 import { notFound } from "next/navigation";
-import Link from "next/link";
 import { WalletView } from "@/components/wallet/WalletView";
 
 type Props = { params: Promise<{ address: string }> };

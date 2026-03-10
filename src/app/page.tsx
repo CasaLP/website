@@ -6,7 +6,7 @@ export default function Home() {
   const router = useRouter();
   const [address, setAddress] = useState("");
 
-  function onSubmit(e: React.FormEvent) {
+  function onSubmit(e: React.SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     const trimmed = address.trim();
     if (!trimmed) return;
