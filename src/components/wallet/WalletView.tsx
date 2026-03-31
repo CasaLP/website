@@ -622,17 +622,17 @@ function OverviewCards({
         className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
       />
       <StatCard
-        label="7D Avg APY"
+        label="Avg APY last 7D"
         value={formatPctOrDash(apy7d)}
         className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
       />
       <StatCard
-        label="30D Avg APY"
+        label="Avg APY last 30D"
         value={formatPctOrDash(apy30d)}
         className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
       />
       <StatCard
-        label="90D Avg APY"
+        label="Avg APY last 90D"
         value={formatPctOrDash(apy90d)}
         className="flex-1 min-w-[calc(50%-8px)] md:min-w-[calc(33.33%-11px)]"
       />
@@ -696,7 +696,7 @@ function DetailsPanel({
 }
 
 function formatPct(v: number) {
-  const sign = v >= 0 ? "+" : "";
+  const sign = v >= 0 ? "" : "-";
   return `${sign}${(v * 100).toFixed(2)}%`;
 }
 
@@ -706,6 +706,7 @@ function formatUsd(v?: number) {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: "USD",
+      currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 2,
     }).format(v);
   } catch {

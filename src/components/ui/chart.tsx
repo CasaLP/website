@@ -50,6 +50,7 @@ const CustomTooltip = ({
     const usdFmt = new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: "USD",
+      currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 2,
     });
 
@@ -83,6 +84,7 @@ export function ModernPerformanceChart({ data }: ModernPerformanceChartProps) {
       new Intl.NumberFormat(undefined, {
         style: "currency",
         currency: "USD",
+        currencyDisplay: "narrowSymbol",
         maximumFractionDigits: 0,
         notation: "compact",
       }),
